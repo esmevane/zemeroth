@@ -12,6 +12,7 @@ pub mod effect;
 pub mod map;
 pub mod execute;
 pub mod component;
+pub mod ability;
 
 mod check;
 
@@ -59,6 +60,10 @@ rancor_storage!(Parts<ObjId>: {
     belongs_to: component::BelongsTo,
     agent: component::Agent,
     blocker: component::Blocker,
+    abilities: component::Abilities,
+    effects: component::Effects,
+    schedule: component::Schedule,
+    // TODO: Add special component for 'reactions' of GasCloud and Fire objects
 });
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -98,24 +103,25 @@ impl State {
     }
 }
 
+// TODO: Move these functions to some other file?
+
 pub fn belongs_to(state: &State, player_id: PlayerId, id: ObjId) -> bool {
     state.parts.belongs_to.get(id).0 == player_id
 }
 
 pub fn object_ids_at(state: &State, pos: PosHex) -> Vec<ObjId> {
-    let ids = state.parts().agent.ids();
-    ids.filter(|&id| state.parts.pos.get(id).0 == pos).collect()
+    let i = state.parts().agent.ids();
+    i.filter(|&id| state.parts.pos.get(id).0 == pos).collect()
 }
 
 pub fn players_agent_ids(state: &State, player_id: PlayerId) -> Vec<ObjId> {
-    let ids = state.parts().agent.ids();
-    ids.filter(|&id| belongs_to(state, player_id, id)).collect()
+    let i = state.parts().agent.ids();
+    i.filter(|&id| belongs_to(state, player_id, id)).collect()
 }
 
 pub fn enemy_agent_ids(state: &State, player_id: PlayerId) -> Vec<ObjId> {
-    let ids = state.parts().agent.ids();
-    ids.filter(|&id| !belongs_to(state, player_id, id))
-        .collect()
+    let i = state.parts().agent.ids();
+    i.filter(|&id| !belongs_to(state, player_id, id)).collect()
 }
 
 pub fn is_tile_blocked(state: &State, pos: PosHex) -> bool {

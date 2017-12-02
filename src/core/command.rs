@@ -1,13 +1,18 @@
 use core::{ObjId, PlayerId};
 use core::map::PosHex;
 use core::movement::Path;
+use core::ability::Ability;
 
 #[derive(Debug, Clone)]
 pub enum Command {
     Create(Create),
+
+    // TODO: Maybe move/attack could be abilities too?
     Attack(Attack),
     MoveTo(MoveTo),
+
     EndTurn(EndTurn),
+    UseAbility(UseAbility),
 }
 
 #[derive(Debug, Clone)]
@@ -31,3 +36,10 @@ pub struct MoveTo {
 
 #[derive(Debug, Clone)]
 pub struct EndTurn;
+
+#[derive(Debug, Clone)]
+pub struct UseAbility {
+    pub id: ObjId,
+    pub pos: PosHex,
+    pub ability: Ability,
+}

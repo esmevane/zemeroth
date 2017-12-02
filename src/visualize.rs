@@ -8,12 +8,13 @@ use core::{ObjId, PlayerId, State};
 use core::event::{ActiveEvent, Event};
 use core::map::PosHex;
 use core::event;
-use core::effect::{self, Effect};
+use core::effect::{self, Effect, LastingEffect, TimedEffect};
 use core::execute::Phase;
+use core::ability::Ability;
 use game_view::GameView;
 use map;
 
-fn message(view: &mut GameView, context: &mut Context, pos: PosHex, text: &str) -> Box<Action> {
+pub fn message(view: &mut GameView, context: &mut Context, pos: PosHex, text: &str) -> Box<Action> {
     let visible = [0.0, 0.0, 0.0, 1.0];
     let invisible = [0.0, 0.0, 0.0, 0.0];
     let mut sprite = gui::text_sprite(context, text, 0.1);
@@ -49,6 +50,38 @@ fn show_blood_spot(view: &mut GameView, context: &mut Context, at: PosHex) -> Bo
         Box::new(action::Show::new(&view.layers().blood, &blood)),
         Box::new(action::ChangeColorTo::new(&blood, color_final, Time(0.3))),
     ]))
+}
+
+fn show_flare_scale(
+    view: &mut GameView,
+    context: &mut Context,
+    at: PosHex,
+    color: [f32; 4],
+    scale: f32,
+) -> Box<Action> {
+    let visible = color;
+    let mut invisible = visible;
+    invisible[3] = 0.0;
+    let size = view.tile_size() * 2.0 * scale;
+    let mut flare = Sprite::from_path(context, "white_hex.png", size); // TODO: use special sprite
+    let point = map::hex_to_point(view.tile_size(), at);
+    flare.set_pos(point);
+    flare.set_color(invisible);
+    Box::new(action::Sequence::new(vec![
+        Box::new(action::Show::new(&view.layers().flares, &flare)),
+        Box::new(action::ChangeColorTo::new(&flare, visible, Time(0.1))),
+        Box::new(action::ChangeColorTo::new(&flare, invisible, Time(0.3))),
+        Box::new(action::Hide::new(&view.layers().flares, &flare)),
+    ]))
+}
+
+fn show_flare(
+    view: &mut GameView,
+    context: &mut Context,
+    at: PosHex,
+    color: [f32; 4],
+) -> Box<Action> {
+    show_flare_scale(view, context, at, color, 1.0)
 }
 
 fn remove_brief_unit_info(view: &mut GameView, id: ObjId) -> Box<Action> {
@@ -112,7 +145,7 @@ fn generate_brief_obj_info(
     Box::new(action::Sequence::new(actions))
 }
 
-fn showhide_brief_unit_info(
+pub fn refresh_brief_unit_info(
     state: &State,
     view: &mut GameView,
     context: &mut Context,
@@ -149,9 +182,26 @@ fn visualize_pre(
 ) -> Box<Action> {
     let mut actions = Vec::new();
     actions.push(visualize_event(state, view, context, &event.active_event));
-    for (&target_id, effects) in &event.effects {
+    for (&target_id, effects) in &event.instant_effects {
         for effect in effects {
-            actions.push(visualize_effect(state, view, context, target_id, effect));
+            actions.push(visualize_instant_effect(
+                state,
+                view,
+                context,
+                target_id,
+                effect,
+            ));
+        }
+    }
+    for (&target_id, effects) in &event.timed_effects {
+        for effect in effects {
+            actions.push(visualize_lasting_effect(
+                state,
+                view,
+                context,
+                target_id,
+                effect,
+            ));
         }
     }
     Box::new(action::Sequence::new(actions))
@@ -165,10 +215,13 @@ fn visualize_post(
 ) -> Box<Action> {
     let mut actions = Vec::new();
     for &id in &event.actor_ids {
-        actions.push(showhide_brief_unit_info(state, view, context, id));
+        actions.push(refresh_brief_unit_info(state, view, context, id));
     }
-    for &id in event.effects.keys() {
-        actions.push(showhide_brief_unit_info(state, view, context, id));
+    for &id in event.instant_effects.keys() {
+        actions.push(refresh_brief_unit_info(state, view, context, id));
+    }
+    for &id in event.timed_effects.keys() {
+        actions.push(refresh_brief_unit_info(state, view, context, id));
     }
     Box::new(action::Sequence::new(actions))
 }
@@ -185,6 +238,9 @@ fn visualize_event(
         ActiveEvent::Attack(ref event) => visualize_event_attack(state, view, context, event),
         ActiveEvent::EndTurn(ref event) => visualize_event_end_turn(state, view, context, event),
         ActiveEvent::BeginTurn(ref ev) => visualize_event_begin_turn(state, view, context, ev),
+        ActiveEvent::UseAbility(ref ev) => visualize_event_use_ability(state, view, context, ev),
+        ActiveEvent::EffectTick(ref ev) => visualize_event_effect_tick(state, view, context, ev),
+        ActiveEvent::EffectEnd(ref ev) => visualize_event_effect_end(state, view, context, ev),
     }
 }
 
@@ -295,7 +351,93 @@ fn visualize_event_begin_turn(
     ]))
 }
 
-fn visualize_effect(
+fn visualize_event_use_ability(
+    state: &State,
+    view: &mut GameView,
+    context: &mut Context,
+    event: &event::UseAbility,
+) -> Box<Action> {
+    let pos = state.parts().pos.get(event.id).0;
+    let text = event.ability.to_str();
+    let action_main: Box<Action> = match event.ability {
+        Ability::Jump => {
+            // TODO: extract to a separate function
+            let sprite = view.id_to_sprite(event.id).clone();
+            let from = state.parts().pos.get(event.id).0;
+            let from = map::hex_to_point(view.tile_size(), from);
+            let to = map::hex_to_point(view.tile_size(), event.pos);
+            let diff = Point(to.0 - from.0);
+            // TODO: time should depend on distance
+            let main_move = Box::new(action::MoveBy::new(&sprite, diff, Time(0.3)));
+            let duration = main_move.duration();
+            let duration_025 = Time(duration.0 * 0.25);
+            let up_fast = Point(vec2(0.0, view.tile_size() * 0.75));
+            let up_slow = Point(vec2(0.0, view.tile_size() * 0.25));
+            let down_slow = Point(vec2(0.0, -view.tile_size() * 0.25));
+            let down_fast = Point(vec2(0.0, -view.tile_size() * 0.75));
+            Box::new(action::Sequence::new(vec![
+                Box::new(action::Fork::new(main_move)),
+                Box::new(action::MoveBy::new(&sprite, up_fast, duration_025)),
+                Box::new(action::MoveBy::new(&sprite, up_slow, duration_025)),
+                Box::new(action::MoveBy::new(&sprite, down_slow, duration_025)),
+                Box::new(action::MoveBy::new(&sprite, down_fast, duration_025)),
+            ]))
+        }
+        Ability::Explode => show_flare_scale(view, context, pos, [1.0, 0.0, 0.0, 0.7], 2.0),
+        _ => Box::new(action::Sleep::new(Time(0.0))),
+    };
+    Box::new(action::Sequence::new(vec![
+        message(view, context, pos, &format!("<{}>", text)),
+        action_main,
+    ]))
+}
+
+fn visualize_event_effect_tick(
+    state: &State,
+    view: &mut GameView,
+    context: &mut Context,
+    event: &event::EffectTick,
+) -> Box<Action> {
+    let pos = state.parts().pos.get(event.id).0;
+    match event.effect {
+        LastingEffect::Poison => show_flare(view, context, pos, [0.0, 0.8, 0.0, 0.7]),
+    }
+}
+
+fn visualize_event_effect_end(
+    state: &State,
+    view: &mut GameView,
+    context: &mut Context,
+    event: &event::EffectEnd,
+) -> Box<Action> {
+    let pos = state.parts().pos.get(event.id).0;
+    let s = match event.effect {
+        LastingEffect::Poison => "Poisoned",
+    };
+    message(view, context, pos, &format!("[{}] ended", s))
+}
+
+pub fn visualize_lasting_effect(
+    state: &State,
+    view: &mut GameView,
+    context: &mut Context,
+    target_id: ObjId,
+    timed_effect: &TimedEffect,
+) -> Box<Action> {
+    let pos = state.parts().pos.get(target_id).0;
+    let action_flare = match timed_effect.effect {
+        LastingEffect::Poison => show_flare(view, context, pos, [0.0, 0.8, 0.0, 0.7]),
+    };
+    let s = match timed_effect.effect {
+        LastingEffect::Poison => "Poisoned",
+    };
+    Box::new(action::Sequence::new(vec![
+        message(view, context, pos, &format!("[{}]", s)),
+        action_flare,
+    ]))
+}
+
+pub fn visualize_instant_effect(
     state: &State,
     view: &mut GameView,
     context: &mut Context,
@@ -304,9 +446,9 @@ fn visualize_effect(
 ) -> Box<Action> {
     match *effect {
         Effect::Kill => visualize_effect_kill(state, view, context, target_id),
-        Effect::Wound(ref effect) => {
-            visualize_effect_wound(state, view, context, target_id, effect)
-        }
+        Effect::Wound(ref e) => visualize_effect_wound(state, view, context, target_id, e),
+        Effect::Knockback(ref e) => visualize_effect_knockback(state, view, context, target_id, e),
+        Effect::FlyOff(ref e) => visualize_effect_fly_off(state, view, context, target_id, e),
         Effect::Miss => visualize_effect_miss(state, view, context, target_id),
     }
 }
@@ -339,8 +481,8 @@ fn visualize_effect_wound(
     target_id: ObjId,
     effect: &effect::Wound,
 ) -> Box<Action> {
+    let damage = effect.damage;
     let pos = state.parts().pos.get(target_id).0;
-    let damage = effect.0;
     let sprite = view.id_to_sprite(target_id).clone();
     let color_normal = sprite.color();
     let color_dark = [0.1, 0.1, 0.1, 1.0];
@@ -350,6 +492,35 @@ fn visualize_effect_wound(
         Box::new(action::ChangeColorTo::new(&sprite, color_normal, Time(0.2))),
         show_blood_spot(view, context, pos),
     ]))
+}
+
+fn visualize_effect_knockback(
+    _: &State,
+    view: &mut GameView,
+    context: &mut Context,
+    target_id: ObjId,
+    effect: &effect::Knockback,
+) -> Box<Action> {
+    // TODO: show some rotating dusty clouds
+    let sprite = view.id_to_sprite(target_id).clone();
+    let from = map::hex_to_point(view.tile_size(), effect.from);
+    let to = map::hex_to_point(view.tile_size(), effect.to);
+    let diff = Point(to.0 - from.0);
+    Box::new(action::Sequence::new(vec![
+        message(view, context, effect.to, "bump"),
+        Box::new(action::MoveBy::new(&sprite, diff, Time(0.15))),
+    ]))
+}
+
+fn visualize_effect_fly_off(
+    _: &State,
+    _: &mut GameView,
+    _: &mut Context,
+    _: ObjId,
+    _: &effect::FlyOff,
+) -> Box<Action> {
+    // TODO: move unit's sprite in an arc (see Jump's visualization)
+    unimplemented!(); // TODO:
 }
 
 fn visualize_effect_miss(

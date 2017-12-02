@@ -1,15 +1,17 @@
 use std::collections::{HashMap, VecDeque};
 use std::iter::FromIterator;
 use rand::{thread_rng, Rng};
-use core::map::PosHex;
+use core::map::{Dir, PosHex};
 use core::{self, Moves, ObjId, PlayerId, State, TileType};
 use core::command;
 use core::component::{self, Component};
 use core::command::Command;
 use core::event::{self, ActiveEvent, Event};
-use core::effect::{self, Effect};
+use core::effect::{self, Duration, Effect, LastingEffect, TimedEffect};
 use core::check::{check, check_attack_at, Error};
 use core::movement::Path;
+use core::ability::Ability;
+use core::map;
 
 #[derive(PartialEq, Clone, Copy, Debug)]
 pub enum Phase {
@@ -31,6 +33,7 @@ where
         Command::MoveTo(ref command) => execute_move_to(state, cb, command),
         Command::Attack(ref command) => execute_attack(state, cb, command),
         Command::EndTurn(ref command) => execute_end_turn(state, cb, command),
+        Command::UseAbility(ref command) => execute_use_ability(state, cb, command),
     }
     Ok(())
 }
@@ -55,13 +58,8 @@ where
     while let Some(pos) = remainder.pop_front() {
         if check_reaction_attacks_at(state, id, pos) {
             current_path.push(pos);
-            do_move(
-                state,
-                cb,
-                id,
-                cost.take(),
-                Path::new(current_path.split_off(0)),
-            );
+            let path = Path::new(current_path.split_off(0));
+            do_move(state, cb, id, cost.take(), path);
             let attack_status = try_execute_reaction_attacks(state, cb, id);
             if attack_status == AttackStatus::Hit {
                 return;
@@ -81,7 +79,8 @@ where
     let event = Event {
         active_event,
         actor_ids: vec![id],
-        effects: HashMap::new(),
+        instant_effects: HashMap::new(),
+        timed_effects: HashMap::new(),
     };
     do_event(state, cb, &event);
 }
@@ -128,7 +127,8 @@ where
     let event = Event {
         active_event,
         actor_ids: vec![id],
-        effects: HashMap::new(),
+        instant_effects: HashMap::new(),
+        timed_effects: HashMap::new(),
     };
     do_event(state, cb, &event);
 }
@@ -153,26 +153,31 @@ where
         target_id: command.target_id,
         mode,
     });
-    let mut effects = HashMap::new();
-    let effect = if thread_rng().gen_range(0, 6) < 3 {
+    let mut target_effects = Vec::new();
+    // TODO: Extract `thread_rng().gen_range(0, 6)` to `roll_dice` func
+    // TODO: WE NEED SOME ACTUAL MATH HERE
+    if thread_rng().gen_range(0, 6) < 4 {
         let strength = state.parts.strength.get(command.target_id);
         if strength.strength.0 > 1 {
-            Effect::Wound(effect::Wound(core::Strength(1)))
+            let damage = core::Strength(1);
+            target_effects.push(Effect::Wound(effect::Wound { damage }));
         } else {
-            Effect::Kill
+            target_effects.push(Effect::Kill);
         }
+    }
+    let status = if target_effects.is_empty() {
+        target_effects.push(Effect::Miss);
+        AttackStatus::Miss
     } else {
-        Effect::Miss
+        AttackStatus::Hit
     };
-    let status = match effect {
-        Effect::Kill | Effect::Wound(_) => AttackStatus::Hit,
-        Effect::Miss => AttackStatus::Miss,
-    };
-    effects.insert(command.target_id, vec![effect.clone()]);
+    let mut effects = HashMap::new();
+    effects.insert(command.target_id, target_effects);
     let event = Event {
         active_event,
         actor_ids: vec![command.attacker_id],
-        effects,
+        instant_effects: effects,
+        timed_effects: HashMap::new(),
     };
     do_event(state, cb, &event);
     status
@@ -182,6 +187,7 @@ fn try_execute_reaction_attacks<F>(state: &mut State, cb: &mut F, target_id: Obj
 where
     F: FnMut(&State, &Event, Phase),
 {
+    let target_owner = state.parts.belongs_to.get(target_id).0;
     let mut status = AttackStatus::Miss;
     let initial_player_id = state.player_id;
     for obj_id in core::enemy_agent_ids(state, initial_player_id) {
@@ -189,12 +195,16 @@ where
             // check if target is killed
             continue;
         }
+        let this_unit_owner = state.parts.belongs_to.get(obj_id).0;
+        if this_unit_owner == target_owner {
+            continue;
+        }
         let command_attack = command::Attack {
             attacker_id: obj_id,
             target_id,
         };
         let command = command::Command::Attack(command_attack.clone());
-        state.player_id = state.parts.belongs_to.get(obj_id).0;
+        state.player_id = this_unit_owner;
         if check(state, &command).is_err() {
             continue;
         }
@@ -226,11 +236,11 @@ where
             player_id: player_id_old,
         });
         let actor_ids = core::players_agent_ids(state, player_id_old);
-        let effects = HashMap::new();
         let event = Event {
             active_event,
             actor_ids,
-            effects,
+            instant_effects: HashMap::new(),
+            timed_effects: HashMap::new(),
         };
         do_event(state, cb, &event);
     }
@@ -240,14 +250,246 @@ where
             player_id: player_id_new,
         });
         let actor_ids = core::players_agent_ids(state, player_id_new);
-        let effects = HashMap::new();
         let event = Event {
             active_event,
             actor_ids,
-            effects,
+            instant_effects: HashMap::new(),
+            timed_effects: HashMap::new(),
         };
         do_event(state, cb, &event);
     }
+
+    // TODO: move this block to a separate function
+    {
+        let phase = effect::Phase(state.player_id().0 as _);
+        let ids: Vec<_> = state.parts.schedule.ids().collect();
+        for obj_id in ids {
+            let pos = state.parts.pos.get(obj_id).0;
+            let mut activated = Vec::new();
+            {
+                let schedule = state.parts.schedule.get_mut(obj_id);
+                for planned in &mut schedule.planned {
+                    if planned.phase != phase.0 {
+                        println!("wrong phase");
+                        continue;
+                    }
+                    planned.rounds -= 1;
+                    println!("TICK");
+                    if planned.rounds == 0 {
+                        println!("BOOM");
+                        // TODO: use straight events or something
+                        let c = command::UseAbility {
+                            ability: planned.ability,
+                            id: obj_id,
+                            pos,
+                        };
+                        activated.push(c);
+                    }
+                }
+                schedule.planned.retain(|p| p.rounds > 0);
+            }
+            for command in activated {
+                if state.parts.is_exist(obj_id) {
+                    execute_use_ability(state, cb, &command);
+                }
+            }
+        }
+    }
+
+    // TODO: move this block to a separate function
+    {
+        // TODO: tick and kill all the lasting effects here
+        // Ouch. This will not work for non-player objects like gas, fire ob bombs.
+        // But when should I trigger unit's effects like Poisoned?
+        let phase = effect::Phase(state.player_id().0 as _);
+        let ids: Vec<_> = state.parts.effects.ids().collect();
+        for obj_id in ids {
+            for effect in &mut state.parts.effects.get_mut(obj_id).0 {
+                if effect.phase == phase {
+                    // debug!("TICK: {:?}", effect); // TODO
+                    if let Duration::Rounds(ref mut n) = effect.duration {
+                        *n -= 1;
+                    }
+                }
+            }
+
+            for effect in &mut state.parts.effects.get_mut(obj_id).0.clone() {
+                if effect.phase != phase {
+                    continue;
+                }
+                assert!(state.parts().is_exist(obj_id));
+                // TODO: simplify this block!
+                {
+                    let active_event = event::EffectTick {
+                        id: obj_id,
+                        effect: effect.effect.clone(),
+                    };
+                    let mut target_effects = Vec::new();
+                    if state.parts.strength.get(obj_id).strength.0 > 1 {
+                        let damage = core::Strength(1);
+                        target_effects.push(Effect::Wound(effect::Wound { damage }));
+                    } else {
+                        target_effects.push(Effect::Kill);
+                    }
+                    let mut instant_effects = HashMap::new();
+                    instant_effects.insert(obj_id, target_effects);
+                    let event = Event {
+                        active_event: ActiveEvent::EffectTick(active_event),
+                        actor_ids: vec![obj_id],
+                        instant_effects,
+                        timed_effects: HashMap::new(),
+                    };
+                    do_event(state, cb, &event);
+                }
+                if !state.parts().is_exist(obj_id) {
+                    break;
+                }
+                if effect.duration.is_over() {
+                    let active_event = event::EffectEnd {
+                        id: obj_id,
+                        effect: effect.effect.clone(),
+                    };
+                    let event = Event {
+                        active_event: ActiveEvent::EffectEnd(active_event),
+                        actor_ids: vec![obj_id],
+                        instant_effects: HashMap::new(),
+                        timed_effects: HashMap::new(),
+                    };
+                    do_event(state, cb, &event);
+                }
+            }
+
+            if !state.parts().is_exist(obj_id) {
+                continue;
+            }
+
+            let effects = state.parts.effects.get_mut(obj_id);
+            effects.0.retain(|effect| match effect.duration {
+                effect::Duration::Rounds(n) => n > 0,
+                _ => true,
+            });
+        }
+    }
+}
+
+fn execute_use_ability<F>(state: &mut State, cb: &mut F, command: &command::UseAbility)
+where
+    F: FnMut(&State, &Event, Phase),
+{
+    let active_event = ActiveEvent::UseAbility(event::UseAbility {
+        id: command.id,
+        pos: command.pos,
+        ability: command.ability,
+    });
+
+    // TODO: make sure that reaction attacks hit both agents (Or I want something stupid)
+
+    let mut actor_ids = vec![command.id];
+    let mut instant_effects = HashMap::new();
+    let mut timed_effects = HashMap::new();
+    match command.ability {
+        Ability::Knockback => {
+            let object_ids = core::object_ids_at(state, command.pos);
+            assert_eq!(object_ids.len(), 1);
+            let id = object_ids[0];
+
+            // TODO: code duplication
+            let actor_pos = state.parts().pos.get(command.id).0;
+            let dir = Dir::get_dir_from_to(actor_pos, command.pos);
+            let from = command.pos;
+            let to = Dir::get_neighbor_pos(command.pos, dir);
+
+            if state.map().is_inboard(to) && !core::is_tile_blocked(state, to) {
+                let effect = Effect::Knockback(effect::Knockback { from, to });
+                instant_effects.insert(id, vec![effect]);
+            }
+            actor_ids.push(id);
+        }
+        Ability::Club => {
+            let object_ids = core::object_ids_at(state, command.pos);
+            assert_eq!(object_ids.len(), 1);
+            let id = object_ids[0];
+
+            // TODO: code duplication
+            let actor_pos = state.parts().pos.get(command.id).0;
+            let dir = Dir::get_dir_from_to(actor_pos, command.pos);
+            let from = command.pos;
+            let to = Dir::get_neighbor_pos(command.pos, dir);
+
+            if state.map().is_inboard(to) && !core::is_tile_blocked(state, to) {
+                let effect = Effect::FlyOff(effect::FlyOff { from, to });
+                instant_effects.insert(id, vec![effect]);
+            }
+            actor_ids.push(id);
+        }
+        Ability::Jump => {}
+        Ability::Explode => {
+            let from = state.parts().pos.get(command.id).0;
+            for id in state.parts().agent.ids() {
+                let strength = state.parts().strength.get(id);
+                let pos = state.parts().pos.get(id).0;
+                let distance = map::distance_hex(from, pos);
+                if distance.0 > 1 || command.id == id {
+                    continue;
+                }
+                let dir = Dir::get_dir_from_to(from, pos);
+                let to = Dir::get_neighbor_pos(pos, dir);
+                let mut effects = Vec::new();
+                if state.map().is_inboard(to) && !core::is_tile_blocked(state, to) {
+                    effects.push(Effect::Knockback(effect::Knockback { from: pos, to }));
+                }
+                // TODO: this pattern is repeated A LOT:
+                if strength.strength.0 > 1 {
+                    let damage = core::Strength(1);
+                    effects.push(Effect::Wound(effect::Wound { damage }));
+                } else {
+                    effects.push(Effect::Kill);
+                }
+                instant_effects.insert(id, effects);
+            }
+        }
+        Ability::Poison => {
+            // TODO: de-duplicate these three lines
+            let object_ids = core::object_ids_at(state, command.pos);
+            assert_eq!(object_ids.len(), 1);
+            let id = object_ids[0];
+            let owner = state.parts().belongs_to.get(id).0;
+            let phase = effect::Phase(owner.0 as _); // TODO: ugly hack
+
+            // TODO: this is just a test block
+            {
+                if state.parts.schedule.get_opt(id).is_none() {
+                    let component = component::Schedule {
+                        planned: Vec::new(),
+                    };
+                    state.parts.schedule.insert(id, component);
+                }
+                let schedule = state.parts.schedule.get_mut(id);
+                let planned_ability = component::PlannedAbility {
+                    rounds: 1, // explode on next turn
+                    phase: state.player_id.0 as _,
+                    ability: Ability::Explode,
+                };
+                schedule.planned.push(planned_ability);
+            }
+
+            let effect = TimedEffect {
+                duration: effect::Duration::Rounds(2), // TODO: get from the config
+                phase,
+                effect: LastingEffect::Poison,
+            };
+            timed_effects.insert(id, vec![effect]);
+            actor_ids.push(id);
+        }
+    }
+    let event = Event {
+        active_event,
+        actor_ids,
+        instant_effects,
+        timed_effects,
+    };
+    do_event(state, cb, &event);
+    try_execute_reaction_attacks(state, cb, command.id);
 }
 
 fn next_player_id(state: &State) -> PlayerId {
@@ -314,8 +556,8 @@ where
     for &(owner, typename, count) in &[
         (None, "boulder", 10),
         (Some(PlayerId(0)), "swordsman", 2),
-        (Some(PlayerId(0)), "spearman", 2),
-        (Some(PlayerId(1)), "imp", 9),
+        (Some(PlayerId(0)), "spearman", 1),
+        (Some(PlayerId(1)), "imp", 7),
     ] {
         if let Some(player_id) = owner {
             state.player_id = player_id;
