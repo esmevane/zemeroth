@@ -89,6 +89,7 @@ fn build_unit_info_panel(
             for effect in &effects.0 {
                 let s = match effect.effect {
                     LastingEffect::Poison => "poison",
+                    LastingEffect::Stun => "stun",
                 };
                 match effect.duration {
                     Duration::Forever => {

@@ -163,6 +163,14 @@ fn apply_event_end_turn(state: &mut State, event: &EndTurn) {
         if player_id == event.player_id {
             agent.attacks.0 += agent.reactive_attacks.0;
         }
+        if let Some(effects) = state.parts.effects.get_opt(id) {
+            for effect in &effects.0 {
+                match effect.effect {
+                    LastingEffect::Stun => agent.attacks.0 = 0,
+                    _ => {}
+                }
+            }
+        }
     }
 }
 
@@ -177,7 +185,18 @@ fn apply_event_begin_turn(state: &mut State, event: &BeginTurn) {
             agent.moves = agent.base_moves;
             agent.attacks = agent.base_attacks;
             agent.jokers = agent.base_jokers;
-
+            if let Some(effects) = state.parts.effects.get_opt(id) {
+                for effect in &effects.0 {
+                    match effect.effect {
+                        LastingEffect::Stun => {
+                            agent.moves.0 = 0;
+                            agent.attacks.0 = 0;
+                            agent.jokers.0 = 0;
+                        }
+                        _ => {}
+                    }
+                }
+            }
             let abilities = match state.parts.abilities.get_opt_mut(id) {
                 Some(abilities) => &mut abilities.0,
                 None => continue,
@@ -225,7 +244,7 @@ fn apply_event_use_ability(state: &mut State, event: &UseAbility) {
 
 fn apply_event_effect_tick(_: &mut State, effect: &EffectTick) {
     match effect.effect {
-        LastingEffect::Poison => {
+        LastingEffect::Poison | LastingEffect::Stun => {
             // TODO: ?
         }
     }

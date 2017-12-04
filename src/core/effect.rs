@@ -6,11 +6,11 @@ short TODO:
 - [x] schedule abilities
 - [x] UI: cancel ability mode
 - [ ] UI: don't show any ability buttons if there're no APs/JPs
-- [ ] bomb
+- [.] bomb
   - [ ] explodes in one round
   - [ ] self destroys (before?) after that (or just make it a part of the ability)
 - [ ] bomb animation
-- [ ] stun ability
+- [x] stun ability
 - [ ] gas cloud - 'reaction' abilities
   - [ ] poison every entering agent
   - [ ] self-destroy in
@@ -125,6 +125,7 @@ pub struct TimedEffect {
 #[derive(Clone, Debug)]
 pub enum Effect {
     Kill,
+    Stun,
     Wound(Wound),
     Knockback(Knockback),
     FlyOff(FlyOff),
@@ -135,7 +136,7 @@ pub enum Effect {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum LastingEffect {
     Poison,
-    // Stun, // <- this one should be easy
+    Stun,
     // Burn,
     // KnockDown,
 
@@ -173,6 +174,7 @@ pub fn apply_instant(state: &mut State, id: ObjId, effect: &Effect) {
     debug!("effect::apply_instant: {:?}", effect);
     match *effect {
         Effect::Kill => apply_kill(state, id),
+        Effect::Stun => apply_stun(state, id),
         Effect::Wound(ref effect) => apply_wound(state, id, effect),
         Effect::Knockback(ref effect) => apply_knockback(state, id, effect),
         Effect::FlyOff(ref effect) => apply_fly_off(state, id, effect),
@@ -182,6 +184,13 @@ pub fn apply_instant(state: &mut State, id: ObjId, effect: &Effect) {
 
 fn apply_kill(state: &mut State, id: ObjId) {
     state.parts.remove(id);
+}
+
+fn apply_stun(state: &mut State, id: ObjId) {
+    let agent = state.parts.agent.get_mut(id);
+    agent.moves.0 = 0;
+    agent.attacks.0 = 0;
+    agent.jokers.0 = 0;
 }
 
 fn apply_wound(state: &mut State, id: ObjId, effect: &Wound) {

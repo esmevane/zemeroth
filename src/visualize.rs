@@ -183,14 +183,15 @@ fn visualize_pre(
     let mut actions = Vec::new();
     actions.push(visualize_event(state, view, context, &event.active_event));
     for (&target_id, effects) in &event.instant_effects {
+        // TODO: fork here?
         for effect in effects {
-            actions.push(visualize_instant_effect(
+            actions.push(Box::new(action::Fork::new(visualize_instant_effect(
                 state,
                 view,
                 context,
                 target_id,
                 effect,
-            ));
+            ))));
         }
     }
     for (&target_id, effects) in &event.timed_effects {
@@ -401,6 +402,7 @@ fn visualize_event_effect_tick(
     let pos = state.parts().pos.get(event.id).0;
     match event.effect {
         LastingEffect::Poison => show_flare(view, context, pos, [0.0, 0.8, 0.0, 0.7]),
+        LastingEffect::Stun => show_flare(view, context, pos, [1.0, 1.0, 1.0, 0.7]),
     }
 }
 
@@ -411,8 +413,10 @@ fn visualize_event_effect_end(
     event: &event::EffectEnd,
 ) -> Box<Action> {
     let pos = state.parts().pos.get(event.id).0;
+    // TODO: this code is duplicated:
     let s = match event.effect {
         LastingEffect::Poison => "Poisoned",
+        LastingEffect::Stun => "Stunned",
     };
     message(view, context, pos, &format!("[{}] ended", s))
 }
@@ -427,13 +431,18 @@ pub fn visualize_lasting_effect(
     let pos = state.parts().pos.get(target_id).0;
     let action_flare = match timed_effect.effect {
         LastingEffect::Poison => show_flare(view, context, pos, [0.0, 0.8, 0.0, 0.7]),
+        LastingEffect::Stun => show_flare(view, context, pos, [1.0, 1.0, 1.0, 0.7]),
     };
+    // TODO: code duplication:
     let s = match timed_effect.effect {
         LastingEffect::Poison => "Poisoned",
+        LastingEffect::Stun => "Stunned",
     };
     Box::new(action::Sequence::new(vec![
-        message(view, context, pos, &format!("[{}]", s)),
         action_flare,
+        // Box::new(action::Sleep::new(Time(0.25))),
+        message(view, context, pos, &format!("[{}]", s)),
+        // Box::new(action::Sleep::new(Time(0.25))),
     ]))
 }
 
@@ -444,13 +453,19 @@ pub fn visualize_instant_effect(
     target_id: ObjId,
     effect: &Effect,
 ) -> Box<Action> {
-    match *effect {
+    let main_action = match *effect {
         Effect::Kill => visualize_effect_kill(state, view, context, target_id),
+        Effect::Stun => visualize_effect_stun(state, view, context, target_id),
         Effect::Wound(ref e) => visualize_effect_wound(state, view, context, target_id, e),
         Effect::Knockback(ref e) => visualize_effect_knockback(state, view, context, target_id, e),
         Effect::FlyOff(ref e) => visualize_effect_fly_off(state, view, context, target_id, e),
         Effect::Miss => visualize_effect_miss(state, view, context, target_id),
-    }
+    };
+    Box::new(action::Sequence::new(vec![
+        // Box::new(action::Sleep::new(Time(0.25))),
+        main_action,
+        // Box::new(action::Sleep::new(Time(0.25))),
+    ]))
 }
 
 fn visualize_effect_kill(
@@ -472,6 +487,16 @@ fn visualize_effect_kill(
         Box::new(action::ChangeColorTo::new(&sprite, invisible, Time(0.2))),
         Box::new(action::Hide::new(&view.layers().units, &sprite)),
     ]))
+}
+
+// TODO:
+fn visualize_effect_stun(
+    _state: &State,
+    _view: &mut GameView,
+    _context: &mut Context,
+    _target_id: ObjId,
+) -> Box<Action> {
+    Box::new(action::Sleep::new(Time(1.0)))
 }
 
 fn visualize_effect_wound(
@@ -514,13 +539,21 @@ fn visualize_effect_knockback(
 
 fn visualize_effect_fly_off(
     _: &State,
-    _: &mut GameView,
-    _: &mut Context,
-    _: ObjId,
-    _: &effect::FlyOff,
+    view: &mut GameView,
+    context: &mut Context,
+    target_id: ObjId,
+    effect: &effect::FlyOff,
 ) -> Box<Action> {
     // TODO: move unit's sprite in an arc (see Jump's visualization)
-    unimplemented!(); // TODO:
+    // TODO: add rotating dusty clouds
+    let sprite = view.id_to_sprite(target_id).clone();
+    let from = map::hex_to_point(view.tile_size(), effect.from);
+    let to = map::hex_to_point(view.tile_size(), effect.to);
+    let diff = Point(to.0 - from.0);
+    Box::new(action::Sequence::new(vec![
+        message(view, context, effect.to, "bump"),
+        Box::new(action::MoveBy::new(&sprite, diff, Time(0.15))),
+    ]))
 }
 
 fn visualize_effect_miss(

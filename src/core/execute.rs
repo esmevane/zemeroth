@@ -325,11 +325,19 @@ where
                         effect: effect.effect.clone(),
                     };
                     let mut target_effects = Vec::new();
-                    if state.parts.strength.get(obj_id).strength.0 > 1 {
-                        let damage = core::Strength(1);
-                        target_effects.push(Effect::Wound(effect::Wound { damage }));
-                    } else {
-                        target_effects.push(Effect::Kill);
+                    match effect.effect {
+                        LastingEffect::Poison => {
+                            let damage = core::Strength(1);
+                            if state.parts.strength.get(obj_id).strength.0 > 1 {
+                                target_effects.push(Effect::Wound(effect::Wound { damage }));
+                            } else {
+                                target_effects.push(Effect::Kill);
+                            }
+                        }
+                        LastingEffect::Stun => {
+                            // TODO: this doesn't remove reaction attacks!
+                            target_effects.push(Effect::Stun);
+                        }
                     }
                     let mut instant_effects = HashMap::new();
                     instant_effects.insert(obj_id, target_effects);
@@ -419,6 +427,24 @@ where
             if state.map().is_inboard(to) && !core::is_tile_blocked(state, to) {
                 let effect = Effect::FlyOff(effect::FlyOff { from, to });
                 instant_effects.insert(id, vec![effect]);
+            }
+            {
+                let owner = state.parts().belongs_to.get(id).0;
+                let phase = effect::Phase(owner.0 as _); // TODO: ugly hack + code duplication
+                let effect = TimedEffect {
+                    duration: effect::Duration::Rounds(2), // TODO: get from the config
+                    phase,
+                    effect: LastingEffect::Stun,
+                };
+                timed_effects.insert(id, vec![effect]);
+            }
+            {
+                // TODO: instant stun?
+                if instant_effects[&id].is_empty() {
+                    instant_effects.insert(id, vec![Effect::Stun]);
+                } else {
+                    instant_effects.get_mut(&id).unwrap().push(Effect::Stun);
+                }
             }
             actor_ids.push(id);
         }
@@ -519,7 +545,7 @@ fn random_free_pos(state: &State) -> Option<PosHex> {
 fn random_free_sector_pos(state: &State, player_id: PlayerId) -> Option<PosHex> {
     let attempts = 30;
     let radius = state.map().radius();
-    let start_sector_width = radius.0;
+    let start_sector_width = radius.0 + 2;
     for _ in 0..attempts {
         let q = radius.0 - thread_rng().gen_range(0, start_sector_width);
         let pos = PosHex {
@@ -555,9 +581,9 @@ where
     let player_id_initial = state.player_id;
     for &(owner, typename, count) in &[
         (None, "boulder", 10),
-        (Some(PlayerId(0)), "swordsman", 2),
+        (Some(PlayerId(0)), "swordsman", 1),
         (Some(PlayerId(0)), "spearman", 1),
-        (Some(PlayerId(1)), "imp", 7),
+        (Some(PlayerId(1)), "imp", 4),
     ] {
         if let Some(player_id) = owner {
             state.player_id = player_id;

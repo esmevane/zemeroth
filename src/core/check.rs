@@ -161,9 +161,20 @@ fn check_ability_jump(state: &State, id: ObjId, pos: PosHex) -> Result<(), Error
     Ok(())
 }
 
-fn check_ability_club(_: &State, _: ObjId, _: PosHex) -> Result<(), Error> {
-    // TODO: copy most of check_ability_knockback`s logic
-    Ok(())
+fn check_ability_club(state: &State, id: ObjId, pos: PosHex) -> Result<(), Error> {
+    let parts = state.parts();
+    let selected_pos = parts.pos.get(id).0;
+    for target_id in parts.agent.ids() {
+        let target_pos = parts.pos.get(target_id).0;
+        if target_pos != pos {
+            continue;
+        }
+        let dist = map::distance_hex(selected_pos, pos);
+        if dist.0 > 0 && dist.0 < 2 {
+            return Ok(());
+        }
+    }
+    Err(Error::NoTarget)
 }
 
 fn check_ability_poison(state: &State, id: ObjId, pos: PosHex) -> Result<(), Error> {
